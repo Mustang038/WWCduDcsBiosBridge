@@ -80,6 +80,11 @@ internal class M2000C_Listener : AircraftListener
     private const uint MASK_CLP_DECOL = 1024;
     private const uint MASK_CLP_PARK = 2048;
 
+    // --- PCN M lights masks (bit flags in PCN_M_LIGHTS_ADDRESS register) ---
+    private const uint PCN_M_LIGHTS_ADDRESS = 29388;
+    private const uint MASK_M91 = 1024;
+    private const uint MASK_M92 = 2048;
+    private const uint MASK_M93 = 4096;
 
     // --- DCS-BIOS controls (string outputs used as placeholders, addresses overridden) ---
     private DCSBIOSOutput? PCN_LIGHTS_REGISTER; 
@@ -87,6 +92,7 @@ internal class M2000C_Listener : AircraftListener
     private DCSBIOSOutput? CLP_REGISTER_2; 
     private DCSBIOSOutput? CLP_REGISTER_3; 
     private DCSBIOSOutput? PCN_LIGHTS_REGISTER_2;
+    private DCSBIOSOutput? PCN_M_LIGHTS_REGISTER;
 
     private DCSBIOSOutput? PCN_DISP_L;
     private DCSBIOSOutput? PCN_DISP_R;
@@ -98,6 +104,10 @@ internal class M2000C_Listener : AircraftListener
     private string _pcnPrep = "P-1"; 
     private string _pcnDest = "D-1"; 
     
+    private bool _isM91On = false;
+    private bool _isM92On = false;
+    private bool _isM93On = false;
+
     private ushort _clpValue1 = 0;
     private ushort _clpValue2 = 0;
     private ushort _clpValue3 = 0;
@@ -147,6 +157,10 @@ internal class M2000C_Listener : AircraftListener
 
         PCN_LIGHTS_REGISTER_2 = DCSBIOSControlLocator.GetStringDCSBIOSOutput("PCN_DISP_DEST");
         if (PCN_LIGHTS_REGISTER_2 != null) PCN_LIGHTS_REGISTER_2.Address = PCN_LIGHTS_ADDRESS_2;
+
+        // Register for M91/M92/M93 lights
+        PCN_M_LIGHTS_REGISTER = DCSBIOSControlLocator.GetStringDCSBIOSOutput("PCN_DISP_DEST");
+        if (PCN_M_LIGHTS_REGISTER != null) PCN_M_LIGHTS_REGISTER.Address = PCN_M_LIGHTS_ADDRESS;
     }
 
     public override void DcsBiosDataReceived(object sender, DCSBIOSDataEventArgs e)
@@ -175,6 +189,22 @@ internal class M2000C_Listener : AircraftListener
                 refreshLeds = true;
             }
 
+            if (e.Address == PCN_M_LIGHTS_ADDRESS)
+            {
+                ushort val = (ushort)e.Data;
+                bool m91 = (val & MASK_M91) > 0;
+                bool m92 = (val & MASK_M92) > 0;
+                bool m93 = (val & MASK_M93) > 0;
+
+                if (_isM91On != m91 || _isM92On != m92 || _isM93On != m93)
+                {
+                    _isM91On = m91;
+                    _isM92On = m92;
+                    _isM93On = m93;
+                    refreshDisplay = true;
+                }
+            }
+
             if (e.Address == CLP_ADDR_1) {
                 ushort val = (ushort)e.Data;
                 if (_clpValue1 != val) { _clpValue1 = val; refreshDisplay = true; }
@@ -188,8 +218,29 @@ internal class M2000C_Listener : AircraftListener
                 if (_clpValue3 != val) { _clpValue3 = val; refreshDisplay = true; }
             }
             
+            // Handle M91/M92/M93 lights
+            if (e.Address == PCN_M_LIGHTS_ADDRESS)
+            {
+                ushort val = (ushort)e.Data;
+                bool m91 = (val & MASK_M91) > 0;
+                bool m92 = (val & MASK_M92) > 0;
+                bool m93 = (val & MASK_M93) > 0;
+
+                if (_isM91On != m91 || _isM92On != m92 || _isM93On != m93)
+                {
+                    _isM91On = m91;
+                    _isM92On = m92;
+                    _isM93On = m93;
+                    refreshDisplay = true;
+                }
+            }
+
             if (refreshLeds) mcdu.RefreshLeds();
-            if (refreshDisplay) UpdateCautionPanel();
+            if (refreshDisplay)
+            {
+                UpdateCautionPanel();
+                UpdateMcduBottomLine();
+            }
         }
         catch (Exception ex)
         {
@@ -227,12 +278,12 @@ internal class M2000C_Listener : AircraftListener
             else if (PCN_DISP_PREP != null && e.Address == PCN_DISP_PREP.Address)
             {
                 _pcnPrep = e.StringData;
-                UpdateCombinedPrepDestDisplay(output);
+                UpdateMcduBottomLine();
             }
             else if (PCN_DISP_DEST != null && e.Address == PCN_DISP_DEST.Address)
             {
                 _pcnDest = e.StringData;
-                UpdateCombinedPrepDestDisplay(output);
+                UpdateMcduBottomLine();
             }
             
             mcdu.RefreshDisplay();
@@ -385,9 +436,30 @@ internal class M2000C_Listener : AircraftListener
 
     private void UpdateCombinedPrepDestDisplay(Compositor output)
     {
-    string prep = ("P:" + _pcnPrep).PadRight(7).Substring(0,7); // e.g. P:XX padded
-        string dest = ("D:" + _pcnDest).PadRight(7).Substring(0,7);
-        string combinedLine = prep + dest; // 14 chars
-        output.Line(13).Green().WriteLine(combinedLine);
+        UpdateMcduBottomLine();
+    }
+
+    private void UpdateMcduBottomLine()
+    {
+        var output = GetCompositor(DEFAULT_PAGE);
+        var line = output.Line(13);
+        line.ClearRow();
+
+        // Get PREP and DEST strings
+        string prep = ("P:" + _pcnPrep).PadRight(7).Substring(0, 7);
+        string dest = ("D:" + _pcnDest).PadRight(7).Substring(0, 7);
+        string prepDest = prep + dest; // 14 chars
+
+        // Build the string for M lights, ensuring it fits
+        string mLights = "";
+        if (_isM91On) mLights += "M91 ";
+        if (_isM92On) mLights += "M92 ";
+        if (_isM93On) mLights += "M93 ";
+
+        // Combine all parts, ensuring total length is 21
+        string combinedLine = (prepDest + mLights).PadRight(21).Substring(0, 21);
+        
+        line.Green().WriteLine(combinedLine);
+        mcdu.RefreshDisplay();
     }
 }
